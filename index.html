@@ -1,0 +1,455 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Tisch-Maulwurf</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bowlby+One&family=Nunito:wght@500;700;800&display=swap">
+<style>
+/* Layout: the screen is the phone lying on the desk. Four holes sit in the
+   four corners, matching the four tap zones around the phone (Holo topology). */
+:root {
+  --oak: #c8915a;
+  --oak-dark: #a8713f;
+  --grain: rgba(90, 50, 20, .14);
+  --hole: #2b1a10;
+  --ink: #2a1708;
+  --cream: #fff4e3;
+  --leaf: #3f7d3a;
+  --alarm: #c4392d;
+  --mole: #6b4a35;
+  --mole-snout: #e9a6a0;
+  --display: "Bowlby One", "Arial Black", Impact, sans-serif;
+  --body: "Nunito", ui-rounded, -apple-system, system-ui, sans-serif;
+  color-scheme: light;
+}
+html, body { height: 100%; }
+body {
+  margin: 0; overflow: hidden; font-family: var(--body); color: var(--ink);
+  background: var(--oak);
+  background-image:
+    repeating-linear-gradient(97deg, transparent 0 22px, var(--grain) 22px 24px, transparent 24px 61px),
+    repeating-linear-gradient(93deg, transparent 0 140px, rgba(255,255,255,.06) 140px 150px),
+    linear-gradient(180deg, var(--oak), var(--oak-dark));
+  -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent;
+}
+#app {
+  height: 100%; box-sizing: border-box; display: grid;
+  grid-template-rows: 1fr auto 1fr; gap: 12px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 16px;
+}
+.row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; min-height: 0; }
+.hole {
+  position: relative; display: grid; place-items: end center; min-height: 0;
+  border: 0; background: none; padding: 0; cursor: pointer; font: inherit; color: inherit;
+}
+.hole .pit {
+  position: absolute; left: 8%; right: 8%; bottom: 14%; aspect-ratio: 2.2 / 1; max-height: 46%;
+  margin-inline: auto; border-radius: 50%;
+  background: radial-gradient(ellipse at 50% 35%, #120a05 0 55%, var(--hole) 70%);
+  box-shadow: inset 0 10px 18px rgba(0,0,0,.6), 0 3px 0 rgba(255,255,255,.18);
+  overflow: hidden;
+}
+.hole .label {
+  position: absolute; top: 6px; left: 0; right: 0; text-align: center;
+  font-size: 12px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; opacity: .55;
+}
+.hole.target .pit { outline: 4px dashed var(--cream); outline-offset: 6px; }
+.hole.hit .pit { box-shadow: inset 0 10px 18px rgba(0,0,0,.6), 0 0 0 6px var(--leaf); }
+.hole.wrong .pit { box-shadow: inset 0 10px 18px rgba(0,0,0,.6), 0 0 0 6px var(--alarm); }
+.mole {
+  position: absolute; left: 50%; bottom: -100%; width: 46%; aspect-ratio: 1 / 1.05;
+  transform: translateX(-50%); transition: bottom .14s ease-out;
+  background: radial-gradient(circle at 50% 30%, #876048, var(--mole) 60%);
+  border-radius: 50% 50% 40% 40%;
+}
+.mole::before, .mole::after { /* eyes */
+  content: ""; position: absolute; top: 30%; width: 11%; aspect-ratio: 1; border-radius: 50%; background: #120a05;
+}
+.mole::before { left: 30%; } .mole::after { right: 30%; }
+.mole i { position: absolute; top: 46%; left: 50%; width: 26%; aspect-ratio: 1.4; transform: translateX(-50%);
+  background: var(--mole-snout); border-radius: 50%; }
+.hole.up .mole { bottom: 8%; }
+.hole.bonk .mole { bottom: -100%; transition-duration: .08s; }
+
+#center {
+  justify-self: center; width: min(100%, 420px); box-sizing: border-box;
+  background: var(--cream); border-radius: 22px; padding: 18px 18px 16px;
+  box-shadow: 0 10px 0 rgba(60,30,10,.25), 0 20px 40px rgba(60,30,10,.25);
+  display: grid; gap: 12px; text-align: center;
+}
+h1 { margin: 0; font-family: var(--display); font-weight: 400; font-size: clamp(26px, 8vw, 36px); line-height: 1; text-wrap: balance; }
+p { margin: 0; line-height: 1.4; font-size: 15px; }
+.small { font-size: 13px; opacity: .75; }
+.btns { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+button.b {
+  font: 800 16px var(--body); border: 0; border-radius: 14px; padding: 12px 16px;
+  background: var(--ink); color: var(--cream); cursor: pointer; box-shadow: 0 4px 0 rgba(0,0,0,.35);
+}
+button.b.alt { background: transparent; color: var(--ink); box-shadow: inset 0 0 0 2px var(--ink); }
+button.b:active { transform: translateY(2px); box-shadow: 0 2px 0 rgba(0,0,0,.35); }
+button:focus-visible { outline: 3px solid var(--leaf); outline-offset: 3px; }
+.hud { display: flex; justify-content: space-around; font-family: var(--display); font-size: 28px; font-variant-numeric: tabular-nums; }
+.hud span { display: grid; }
+.hud small { font: 800 11px var(--body); letter-spacing: .08em; text-transform: uppercase; opacity: .6; }
+.dots { display: flex; gap: 6px; justify-content: center; }
+.dots b { width: 12px; height: 12px; border-radius: 50%; box-shadow: inset 0 0 0 2px var(--ink); }
+.dots b.on { background: var(--leaf); box-shadow: none; }
+.meter { height: 10px; border-radius: 6px; background: rgba(42,23,8,.15); overflow: hidden; }
+.meter div { height: 100%; width: 0; background: var(--leaf); transition: width .08s; }
+.status { font-weight: 800; min-height: 1.4em; }
+.status.err { color: var(--alarm); }
+@media (prefers-reduced-motion: reduce) { .mole { transition: none; } }
+</style>
+</head>
+<body>
+
+
+<div id="app">
+  <div class="row">
+    <button class="hole" data-z="0" aria-label="Hinten links"><span class="label">hinten links</span><span class="pit"><span class="mole"><i></i></span></span></button>
+    <button class="hole" data-z="1" aria-label="Hinten rechts"><span class="label">hinten rechts</span><span class="pit"><span class="mole"><i></i></span></span></button>
+  </div>
+  <div id="center"></div>
+  <div class="row">
+    <button class="hole" data-z="2" aria-label="Vorne links"><span class="label">vorne links</span><span class="pit"><span class="mole"><i></i></span></span></button>
+    <button class="hole" data-z="3" aria-label="Vorne rechts"><span class="label">vorne rechts</span><span class="pit"><span class="mole"><i></i></span></span></button>
+  </div>
+</div>
+
+<script>
+"use strict";
+/* ---------------------------------------------------------------
+   Tisch-Maulwurf – web prototype of the Holo idea on iPhone.
+   Pipeline (mirrors Holo's HoloCore, simplified):
+   mic → adaptive onset detector → ~85 ms window → impact gate
+       → spectral + temporal + inter-channel features
+       → z-normalised k-NN over calibration taps with novelty/ambiguity rejection
+   --------------------------------------------------------------- */
+const ZONES = ["hinten links", "hinten rechts", "vorne links", "vorne rechts"];
+const PER_ZONE = 8;
+const $ = (s) => document.querySelector(s);
+const holes = [...document.querySelectorAll(".hole")];
+const center = $("#center");
+
+function store(k, v) { try { if (v === undefined) return JSON.parse(localStorage.getItem(k)); localStorage.setItem(k, JSON.stringify(v)); } catch (e) { return null; } }
+
+/* ---------- FFT (radix-2, in place) ---------- */
+function fft(re, im) {
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) { [re[i], re[j]] = [re[j], re[i]]; [im[i], im[j]] = [im[j], im[i]]; }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = -2 * Math.PI / len, wr = Math.cos(ang), wi = Math.sin(ang);
+    for (let i = 0; i < n; i += len) {
+      let cr = 1, ci = 0;
+      for (let k = 0; k < len / 2; k++) {
+        const a = i + k, b = a + len / 2;
+        const tr = re[b] * cr - im[b] * ci, ti = re[b] * ci + im[b] * cr;
+        re[b] = re[a] - tr; im[b] = im[a] - ti; re[a] += tr; im[a] += ti;
+        const nr = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = nr;
+      }
+    }
+  }
+}
+
+/* ---------- Audio capture + onset detection ---------- */
+const WIN = 4096, PRE = 256, HOP = 128;
+const audio = { ctx: null, sr: 48000, on: false, ch: 1, floor: 1e-6, warm: 0, last: -1e9, t: 0,
+  ring: null, ringPos: 0, capture: null, level: 0, onTap: null };
+
+async function startMic() {
+  if (audio.on) return true;
+  if (!navigator.mediaDevices?.getUserMedia) throw new Error("Dieser Browser gibt kein Mikrofon frei (HTTPS nötig).");
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: {
+    echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: { ideal: 2 } } });
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  await ctx.resume();
+  const src = ctx.createMediaStreamSource(stream);
+  const node = ctx.createScriptProcessor(1024, 2, 1);
+  const track = stream.getAudioTracks()[0];
+  audio.ch = Math.min(2, track.getSettings?.().channelCount || 1);
+  audio.ctx = ctx; audio.sr = ctx.sampleRate; audio.on = true; audio.warm = ctx.sampleRate * 0.75;
+  audio.ring = [new Float32Array(PRE), new Float32Array(PRE)];
+  node.onaudioprocess = (e) => process(e.inputBuffer);
+  src.connect(node); node.connect(ctx.destination); // output stays silent
+  audio.keep = { stream, src, node };
+  return true;
+}
+
+function process(buf) {
+  const chs = [buf.getChannelData(0), buf.numberOfChannels > 1 && audio.ch > 1 ? buf.getChannelData(1) : buf.getChannelData(0)];
+  const n = chs[0].length;
+  for (let h = 0; h < n; h += HOP) {
+    let e = 0;
+    for (let i = h; i < h + HOP; i++) { const v = chs[0][i], w = chs[1][i]; e += Math.max(v * v, w * w); }
+    e /= HOP;
+    audio.level = audio.level * 0.8 + e * 0.2;
+    if (audio.capture) {
+      const c = audio.capture;
+      for (let i = h; i < h + HOP && c.pos < WIN; i++, c.pos++) { c.data[0][c.pos] = chs[0][i]; c.data[1][c.pos] = chs[1][i]; }
+      if (c.pos >= WIN) { audio.capture = null; const d = c.data; setTimeout(() => audio.onTap?.(d), 0); }
+    } else {
+      const trig = audio.warm <= 0 && e > audio.floor * 14 && e > 2e-6 && audio.t - audio.last > audio.sr * 0.28;
+      if (trig) {
+        audio.last = audio.t;
+        const data = [new Float32Array(WIN), new Float32Array(WIN)];
+        for (let c = 0; c < 2; c++) for (let i = 0; i < PRE; i++) data[c][i] = audio.ring[c][(audio.ringPos + i) % PRE];
+        audio.capture = { data, pos: PRE };
+        h -= HOP; audio.t -= HOP; // re-run this hop into the capture
+      } else if (audio.t - audio.last > audio.sr * 0.28) {
+        // adaptive noise floor: follow quiet quickly, loud slowly (so speech raises it)
+        audio.floor = e < audio.floor ? audio.floor * 0.9 + e * 0.1 : audio.floor * 0.995 + e * 0.005;
+        audio.floor = Math.max(audio.floor, 1e-9);
+      }
+    }
+    for (let i = h; i < h + HOP; i++) { audio.ring[0][audio.ringPos] = chs[0][i]; audio.ring[1][audio.ringPos] = chs[1][i]; audio.ringPos = (audio.ringPos + 1) % PRE; }
+    audio.t += HOP; audio.warm -= HOP;
+  }
+}
+
+/* ---------- Impact gate + features ---------- */
+function analyse(data) {
+  const sr = audio.sr, two = audio.ch > 1;
+  let peak = 0; for (const c of data) for (const v of c) peak = Math.max(peak, Math.abs(v));
+  // temporal envelope in 8 segments
+  const seg = WIN / 8, env = [[], []];
+  for (let c = 0; c < 2; c++) for (let s = 0; s < 8; s++) { let e = 0; for (let i = s * seg; i < (s + 1) * seg; i++) e += data[c][i] ** 2; env[c].push(e); }
+  const tot = env[0].reduce((a, b) => a + b, 0) + 1e-12;
+  const early = (env[0][0] + env[0][1]) / tot, late = (env[0][5] + env[0][6] + env[0][7]) / tot;
+  const quality = peak > 0.98 ? "clipped" : peak < 0.006 ? "weak" : (late > 0.3 || early < 0.35) ? "sustained" : "ok";
+
+  const edges = []; const lo = 80, hi = Math.min(16000, sr / 2 - 100), NB = 20;
+  for (let b = 0; b <= NB; b++) edges.push(lo * (hi / lo) ** (b / NB));
+  const bands = [];
+  for (let c = 0; c < 2; c++) {
+    const re = new Float64Array(WIN), im = new Float64Array(WIN);
+    for (let i = 0; i < WIN; i++) re[i] = data[c][i] * (i < WIN * 0.75 ? 1 : 0.5 + 0.5 * Math.cos(Math.PI * (i - WIN * 0.75) / (WIN * 0.25)));
+    fft(re, im);
+    const p = new Float64Array(WIN / 2); let total = 1e-12;
+    for (let k = 1; k < WIN / 2; k++) { p[k] = re[k] ** 2 + im[k] ** 2; total += p[k]; }
+    const be = [];
+    for (let b = 0; b < NB; b++) {
+      const k0 = Math.max(1, Math.floor(edges[b] * WIN / sr)), k1 = Math.max(k0 + 1, Math.floor(edges[b + 1] * WIN / sr));
+      let e = 0; for (let k = k0; k < k1; k++) e += p[k];
+      be.push(e);
+    }
+    bands.push({ be, total });
+  }
+  const f = [];
+  for (const b of bands[0].be) f.push(10 * Math.log10(b / bands[0].total + 1e-9) / 10);
+  const etot0 = tot;
+  for (let s = 0; s < 8; s++) f.push(10 * Math.log10(env[0][s] / etot0 + 1e-9) / 10);
+  if (two) {
+    for (const b of bands[1].be) f.push(10 * Math.log10(b / bands[1].total + 1e-9) / 10);
+    for (let b = 0; b < NB; b++) f.push(10 * Math.log10((bands[0].be[b] + 1e-12) / (bands[1].be[b] + 1e-12)) / 10);
+    f.push(10 * Math.log10(bands[0].total / bands[1].total) / 5);
+    // time difference of arrival between the two mics (±1 ms)
+    const L = Math.round(sr * 0.001); let best = 0, bestLag = 0;
+    for (let lag = -L; lag <= L; lag++) {
+      let s = 0; for (let i = PRE - 64; i < PRE + 1024; i++) { const j = i + lag; if (j >= 0 && j < WIN) s += data[0][i] * data[1][j]; }
+      if (s > best) { best = s; bestLag = lag; }
+    }
+    f.push(bestLag / L);
+  }
+  return { f, quality, peak };
+}
+
+/* ---------- Classifier: z-scored k-NN with rejection ---------- */
+let profile = store("holo-maulwurf-profile");
+function train(samples) {
+  const d = samples[0].f.length, n = samples.length;
+  const mean = new Array(d).fill(0), sd = new Array(d).fill(0);
+  for (const s of samples) s.f.forEach((v, i) => mean[i] += v / n);
+  for (const s of samples) s.f.forEach((v, i) => sd[i] += (v - mean[i]) ** 2 / n);
+  for (let i = 0; i < d; i++) sd[i] = Math.sqrt(sd[i]) + 0.02;
+  const p = { mean, sd, samples: samples.map((s) => ({ z: s.zone, x: s.f.map((v, i) => (v - mean[i]) / sd[i]) })), ch: audio.ch };
+  // leave-one-out agreement + typical nearest-neighbour distance (for novelty rejection)
+  let ok = 0; const nn = [];
+  p.samples.forEach((s, idx) => { const r = classifyZ(p, s.x, idx); if (r.zone === s.z) ok++; nn.push(r.dist); });
+  nn.sort((a, b) => a - b);
+  p.loo = ok / n; p.ood = nn[Math.floor(nn.length * 0.9)] * 1.8;
+  return p;
+}
+function dist(a, b) { let s = 0; for (let i = 0; i < a.length; i++) s += (a[i] - b[i]) ** 2; return Math.sqrt(s / a.length); }
+function classifyZ(p, x, skip = -1) {
+  const per = [[], [], [], []];
+  p.samples.forEach((s, i) => { if (i !== skip) per[s.z].push(dist(x, s.x)); });
+  const score = per.map((ds) => { ds.sort((a, b) => a - b); return ds.length ? (ds[0] + (ds[1] ?? ds[0])) / 2 : Infinity; });
+  const order = [0, 1, 2, 3].sort((a, b) => score[a] - score[b]);
+  return { zone: order[0], dist: score[order[0]], margin: 1 - score[order[0]] / score[order[1]] };
+}
+function classify(f) {
+  if (!profile || profile.mean.length !== f.length) return { zone: null, why: "Profil passt nicht, bitte neu kalibrieren" };
+  const x = f.map((v, i) => (v - profile.mean[i]) / profile.sd[i]);
+  const r = classifyZ(profile, x);
+  if (r.dist > profile.ood) return { zone: null, why: "unbekanntes Geräusch", ...r };
+  if (r.margin < 0.06) return { zone: null, why: "nicht eindeutig", ...r };
+  return r;
+}
+
+/* ---------- Board helpers ---------- */
+function setHoles(fn) { holes.forEach((h, i) => fn(h, i)); }
+function flash(i, cls) { const h = holes[i]; h.classList.add(cls); setTimeout(() => h.classList.remove(cls), 260); }
+let onHole = null;
+holes.forEach((h, i) => h.addEventListener("pointerdown", (e) => { e.preventDefault(); onHole?.(i, "touch"); }));
+let wakeLock = null;
+async function keepAwake() { try { wakeLock = await navigator.wakeLock?.request("screen"); } catch (e) {} }
+
+/* ---------- Screens ---------- */
+let micError = "";
+function home() {
+  audio.onTap = null; onHole = null;
+  setHoles((h) => h.classList.remove("target", "up"));
+  const best = store("holo-maulwurf-best") || 0;
+  const cal = profile ? `Kalibriert · Übereinstimmung ${Math.round(profile.loo * 100)} %` : "Noch nicht kalibriert";
+  center.innerHTML = `
+    <h1>Tisch-Maulwurf</h1>
+    <p>Leg das iPhone flach auf den Tisch und klopf <b>neben</b> das Handy, dort wo der Maulwurf auftaucht.</p>
+    <p class="small">${cal}${best ? " · Rekord " + best : ""}</p>
+    <div class="btns">
+      <button class="b" id="bPlay">${profile ? "Spielen" : "Kalibrieren"}</button>
+      ${profile ? '<button class="b alt" id="bCal">Neu kalibrieren</button><button class="b alt" id="bTest">Testen</button>' : ""}
+      <button class="b alt" id="bTouch">Ohne Mikro spielen</button>
+    </div>
+    <p class="status err">${micError}</p>`;
+  $("#bPlay").onclick = () => profile ? withMic(game) : withMic(calibrate);
+  $("#bCal") && ($("#bCal").onclick = () => withMic(calibrate));
+  $("#bTest") && ($("#bTest").onclick = () => withMic(test));
+  $("#bTouch").onclick = () => game(true);
+}
+async function withMic(next) {
+  try { await startMic(); micError = ""; keepAwake(); next(); }
+  catch (e) { micError = (e && e.name === "NotAllowedError") ? "Mikrofon nicht erlaubt. Ohne Mikro geht nur der Touch-Modus." : (e.message || "Mikrofon nicht verfügbar."); home(); }
+}
+
+function calibrate() {
+  const samples = []; let zone = 0, paused = false;
+  const draw = (msg = "", err = false) => {
+    setHoles((h, i) => h.classList.toggle("target", i === zone));
+    const got = samples.filter((s) => s.zone === zone).length;
+    center.innerHTML = `
+      <h1>Klopf: ${ZONES[zone]}</h1>
+      <p>Klopf ${PER_ZONE}× mit dem Fingerknöchel auf den Tisch, <b>${ZONES[zone]}</b> neben dem Handy. Verteil die Klopfer ein bisschen.</p>
+      <div class="dots">${Array.from({ length: PER_ZONE }, (_, i) => `<b class="${i < got ? "on" : ""}"></b>`).join("")}</div>
+      <div class="meter"><div id="lvl"></div></div>
+      <p class="status ${err ? "err" : ""}">${msg}</p>
+      <div class="btns"><button class="b alt" id="bUndo">Rückgängig</button><button class="b alt" id="bBack">Abbrechen</button></div>`;
+    $("#bBack").onclick = home;
+    $("#bUndo").onclick = () => { const k = samples.findLastIndex((s) => s.zone === zone); if (k >= 0) samples.splice(k, 1); draw("Letzter Klopfer entfernt"); };
+  };
+  meterLoop();
+  audio.onTap = (data) => {
+    if (paused) return;
+    const a = analyse(data);
+    if (a.quality === "clipped") return draw("Zu fest, klopf etwas leichter.", true);
+    if (a.quality === "weak") return draw("Zu leise, klopf etwas fester.", true);
+    if (a.quality === "sustained") return draw("Das klang nicht wie ein Klopfen. Kurz warten, dann nochmal.", true);
+    samples.push({ zone, f: a.f });
+    flash(zone, "hit");
+    if (samples.filter((s) => s.zone === zone).length >= PER_ZONE) {
+      if (zone === 3) {
+        profile = train(samples); store("holo-maulwurf-profile", profile);
+        audio.onTap = null; setHoles((h) => h.classList.remove("target"));
+        const pct = Math.round(profile.loo * 100);
+        center.innerHTML = `<h1>Fertig!</h1>
+          <p>Übereinstimmung der Kalibrierung: <b>${pct} %</b></p>
+          <p class="small">${pct >= 80 ? "Sieht gut aus." : "Eher wackelig. Tipp: Handy nicht bewegen, fester Tisch, Zonen weiter auseinander klopfen."}</p>
+          <div class="btns"><button class="b" id="bGo">Spielen</button><button class="b alt" id="bT">Erst testen</button><button class="b alt" id="bR">Nochmal</button></div>`;
+        $("#bGo").onclick = () => game(); $("#bT").onclick = test; $("#bR").onclick = calibrate;
+        return;
+      }
+      zone++; paused = true; draw("Weiter zur nächsten Zone…");
+      setTimeout(() => { paused = false; draw("Bereit"); }, 1100);
+      return;
+    }
+    draw("Gut!");
+  };
+  draw("Bereit");
+}
+
+function meterLoop() {
+  const el = $("#lvl"); if (!el) return;
+  el.style.width = Math.min(100, Math.max(0, (10 * Math.log10(audio.level + 1e-10) + 70) * 1.6)) + "%";
+  requestAnimationFrame(meterLoop);
+}
+
+function test() {
+  setHoles((h) => h.classList.remove("target", "up"));
+  center.innerHTML = `<h1>Testen</h1><p>Klopf irgendwo. Die erkannte Ecke leuchtet grün.</p>
+    <div class="meter"><div id="lvl"></div></div><p class="status" id="res">Warte auf Klopfen…</p>
+    <div class="btns"><button class="b" id="bGo">Spielen</button><button class="b alt" id="bBack">Zurück</button></div>`;
+  $("#bGo").onclick = () => game(); $("#bBack").onclick = home;
+  meterLoop();
+  audio.onTap = (data) => {
+    const a = analyse(data);
+    if (a.quality !== "ok") { $("#res").textContent = "Kein sauberes Klopfen (" + a.quality + ")"; return; }
+    const r = classify(a.f);
+    if (r.zone === null) { $("#res").textContent = "Abgelehnt: " + r.why; return; }
+    flash(r.zone, "hit");
+    $("#res").textContent = `${ZONES[r.zone]} · Sicherheit ${Math.round(r.margin * 100)} %`;
+  };
+}
+
+function game(touchOnly = false) {
+  const LEN = 45000; let score = 0, misses = 0, up = -1, upUntil = 0, timer = null, ended = false;
+  const t0 = performance.now();
+  center.innerHTML = `<div class="hud"><span><small>Punkte</small><b id="sc">0</b></span><span><small>Zeit</small><b id="tm">45</b></span><span><small>Daneben</small><b id="ms">0</b></span></div>
+    <p class="small" id="hint">${touchOnly ? "Touch-Modus: tipp auf das Loch." : "Klopf neben das Handy, wo der Maulwurf ist."}</p>
+    <div class="btns"><button class="b alt" id="bStop">Beenden</button></div>`;
+  $("#bStop").onclick = () => end();
+  setHoles((h) => h.classList.remove("target", "up", "bonk"));
+  const show = () => {
+    if (ended) return;
+    let z; do { z = Math.floor(Math.random() * 4); } while (z === up);
+    up = z; holes[z].classList.remove("bonk"); holes[z].classList.add("up");
+    const elapsed = performance.now() - t0;
+    const stay = Math.max(800, 1700 - elapsed / LEN * 900);
+    upUntil = performance.now() + stay;
+    timer = setTimeout(() => { if (up === z) { holes[z].classList.remove("up"); up = -1; misses++; $("#ms").textContent = misses; } next(); }, stay);
+  };
+  const next = () => { if (!ended) timer = setTimeout(show, 300 + Math.random() * 400); };
+  const hitZone = (z) => {
+    if (ended) return;
+    if (z === up) {
+      clearTimeout(timer); holes[z].classList.add("bonk"); holes[z].classList.remove("up");
+      score += 1 + (upUntil - performance.now() > 500 ? 1 : 0); up = -1;
+      $("#sc").textContent = score; flash(z, "hit"); next();
+    } else { misses++; $("#ms").textContent = misses; flash(z, "wrong"); }
+  };
+  onHole = touchOnly || !audio.on ? (z) => hitZone(z) : null;
+  audio.onTap = touchOnly ? null : (data) => {
+    const a = analyse(data); if (a.quality !== "ok") return;
+    const r = classify(a.f); if (r.zone !== null) hitZone(r.zone);
+  };
+  const tick = setInterval(() => {
+    const left = Math.max(0, Math.ceil((LEN - (performance.now() - t0)) / 1000));
+    const el = $("#tm"); if (el) el.textContent = left;
+    if (left <= 0) end();
+  }, 200);
+  function end() {
+    if (ended) return; ended = true; clearInterval(tick); clearTimeout(timer);
+    audio.onTap = null; onHole = null; setHoles((h) => h.classList.remove("up"));
+    const best = Math.max(score, store("holo-maulwurf-best") || 0); store("holo-maulwurf-best", best);
+    center.innerHTML = `<h1>${score} Punkte</h1><p>Daneben: ${misses} · Rekord: ${best}</p>
+      <div class="btns"><button class="b" id="bAgain">Nochmal</button><button class="b alt" id="bHome">Menü</button></div>`;
+    $("#bAgain").onclick = () => game(touchOnly); $("#bHome").onclick = home;
+  }
+  next();
+}
+
+home();
+</script>
+
+</body>
+</html>
