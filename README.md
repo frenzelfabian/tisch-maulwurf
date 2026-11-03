@@ -15,3 +15,6 @@ Die Erkennung ist eine vereinfachte JavaScript-Version der Holo-Pipeline: Klopf-
 - Fester Holztisch funktioniert am besten, das Handy während des Spielens nicht verschieben.
 - Mit dem Fingerknöchel klopfen, gleichmäßig fest.
 - Wenn die Erkennung nach dem Verschieben schlechter wird: neu kalibrieren.
+- Nach dem Kalibrieren **„Hintergrund aufnehmen“**: 10 Sekunden reden, rascheln, tippen. Diese Geräusche werden danach ignoriert.
+- Im **Testen**-Modus: Wird ein Klopfer falsch erkannt, tipp danach auf das richtige Loch. Das Spiel lernt den Klopfer dazu.
+- **Empfindlichkeit** im Menü: „niedrig“ in lauten Räumen, „hoch“ wenn leise Klopfer nicht erkannt werden.

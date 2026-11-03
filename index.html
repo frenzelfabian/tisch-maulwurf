@@ -133,7 +133,7 @@ button:focus-visible { outline: 3px solid var(--leaf); outline-offset: 3px; }
        → z-normalised k-NN over calibration taps with novelty/ambiguity rejection
    --------------------------------------------------------------- */
 const ZONES = ["hinten links", "hinten rechts", "vorne links", "vorne rechts"];
-const PER_ZONE = 8;
+const PER_ZONE = 10;
 const $ = (s) => document.querySelector(s);
 const holes = [...document.querySelectorAll(".hole")];
 const center = $("#center");
@@ -166,7 +166,11 @@ function fft(re, im) {
 /* ---------- Audio capture + onset detection ---------- */
 const WIN = 4096, PRE = 256, HOP = 128;
 const audio = { ctx: null, sr: 48000, on: false, ch: 1, floor: 1e-6, warm: 0, last: -1e9, t: 0,
-  ring: null, ringPos: 0, capture: null, level: 0, onTap: null };
+  ring: null, ringPos: 0, capture: null, level: 0, onTap: null, hist: [0, 0, 0, 0, 0, 0], loose: false };
+// Sensitivity = how far above the room's noise floor a knock must be.
+const SENS = { niedrig: 24, normal: 14, hoch: 8 };
+let sens = store("holo-maulwurf-sens") || "normal";
+if (!SENS[sens]) sens = "normal";
 
 async function startMic() {
   if (audio.on) return true;
@@ -193,14 +197,19 @@ function process(buf) {
   for (let h = 0; h < n; h += HOP) {
     let e = 0;
     for (let i = h; i < h + HOP; i++) { const v = chs[0][i], w = chs[1][i]; e += Math.max(v * v, w * w); }
-    e /= HOP;
+    e /= HOP; if (!isFinite(e)) e = 0;
     audio.level = audio.level * 0.8 + e * 0.2;
     if (audio.capture) {
       const c = audio.capture;
       for (let i = h; i < h + HOP && c.pos < WIN; i++, c.pos++) { c.data[0][c.pos] = chs[0][i]; c.data[1][c.pos] = chs[1][i]; }
       if (c.pos >= WIN) { audio.capture = null; const d = c.data; setTimeout(() => audio.onTap?.(d), 0); }
     } else {
-      const trig = audio.warm <= 0 && e > audio.floor * 14 && e > 2e-6 && audio.t - audio.last > audio.sr * 0.28;
+      // A knock is a sudden jump: loud vs. the noise floor AND vs. the last few hops
+      // (speech and music rise gradually, so they fail the second test).
+      const k = audio.loose ? 5 : SENS[sens];
+      // compare with the hops 3–6 back, so a knock that starts mid-hop is still caught
+      const prev = (audio.hist[0] + audio.hist[1] + audio.hist[2] + audio.hist[3]) / 4 + 1e-12;
+      const trig = audio.warm <= 0 && e > audio.floor * k && e > 2e-6 && (audio.loose || e > prev * 6) && audio.t - audio.last > audio.sr * 0.28;
       if (trig) {
         audio.last = audio.t;
         const data = [new Float32Array(WIN), new Float32Array(WIN)];
@@ -214,6 +223,7 @@ function process(buf) {
       }
     }
     for (let i = h; i < h + HOP; i++) { audio.ring[0][audio.ringPos] = chs[0][i]; audio.ring[1][audio.ringPos] = chs[1][i]; audio.ringPos = (audio.ringPos + 1) % PRE; }
+    audio.hist.shift(); audio.hist.push(e);
     audio.t += HOP; audio.warm -= HOP;
   }
 }
@@ -265,36 +275,90 @@ function analyse(data) {
   return { f, quality, peak };
 }
 
-/* ---------- Classifier: z-scored k-NN with rejection ---------- */
-let profile = store("holo-maulwurf-profile");
-function train(samples) {
-  const d = samples[0].f.length, n = samples.length;
-  const mean = new Array(d).fill(0), sd = new Array(d).fill(0);
-  for (const s of samples) s.f.forEach((v, i) => mean[i] += v / n);
-  for (const s of samples) s.f.forEach((v, i) => sd[i] += (v - mean[i]) ** 2 / n);
-  for (let i = 0; i < d; i++) sd[i] = Math.sqrt(sd[i]) + 0.02;
-  const p = { mean, sd, samples: samples.map((s) => ({ z: s.zone, x: s.f.map((v, i) => (v - mean[i]) / sd[i]) })), ch: audio.ch };
-  // leave-one-out agreement + typical nearest-neighbour distance (for novelty rejection)
-  let ok = 0; const nn = [];
-  p.samples.forEach((s, idx) => { const r = classifyZ(p, s.x, idx); if (r.zone === s.z) ok++; nn.push(r.dist); });
-  nn.sort((a, b) => a - b);
-  p.loo = ok / n; p.ood = nn[Math.floor(nn.length * 0.9)] * 1.8;
-  return p;
+/* ---------- Classifier (like HoloCore): regularised linear zone model for the
+   boundary, plus nearest-example checks for novelty and recorded background noise ---------- */
+const PROFILE_KEY = "holo-maulwurf-profile-v2";
+let profile = store(PROFILE_KEY);
+
+function solve(A, B) { // Gauss-Jordan: returns A⁻¹B
+  const d = A.length, m = B[0].length;
+  const M = A.map((r, i) => r.concat(B[i]));
+  for (let c = 0; c < d; c++) {
+    let p = c; for (let r = c + 1; r < d; r++) if (Math.abs(M[r][c]) > Math.abs(M[p][c])) p = r;
+    [M[c], M[p]] = [M[p], M[c]];
+    const piv = M[c][c] || 1e-12;
+    for (let r = 0; r < d; r++) if (r !== c) {
+      const f = M[r][c] / piv; if (f) for (let k = c; k < d + m; k++) M[r][k] -= f * M[c][k];
+    }
+  }
+  return M.map((r, i) => r.slice(d).map((v) => v / (M[i][i] || 1e-12)));
+}
+function ridge(xs, zs, lambda) {
+  const d = xs[0].length + 1;
+  const A = Array.from({ length: d }, () => new Array(d).fill(0));
+  const B = Array.from({ length: d }, () => new Array(4).fill(0));
+  xs.forEach((x0, n) => {
+    const x = x0.concat(1);
+    for (let i = 0; i < d; i++) {
+      for (let j = i; j < d; j++) A[i][j] += x[i] * x[j];
+      for (let z = 0; z < 4; z++) B[i][z] += x[i] * (zs[n] === z ? 1 : -1 / 3);
+    }
+  });
+  for (let i = 0; i < d; i++) { for (let j = 0; j < i; j++) A[i][j] = A[j][i]; if (i < d - 1) A[i][i] += lambda; }
+  return solve(A, B);
+}
+function linScores(W, x) {
+  const d = x.length, s = [0, 0, 0, 0];
+  for (let z = 0; z < 4; z++) { let v = W[d][z]; for (let i = 0; i < d; i++) v += x[i] * W[i][z]; s[z] = v; }
+  return s;
 }
 function dist(a, b) { let s = 0; for (let i = 0; i < a.length; i++) s += (a[i] - b[i]) ** 2; return Math.sqrt(s / a.length); }
-function classifyZ(p, x, skip = -1) {
+function near2(ds) { ds.sort((a, b) => a - b); return ds.length ? (ds[0] + (ds[1] ?? ds[0])) / 2 : Infinity; }
+function knn(p, x, skip = -1) {
   const per = [[], [], [], []];
   p.samples.forEach((s, i) => { if (i !== skip) per[s.z].push(dist(x, s.x)); });
-  const score = per.map((ds) => { ds.sort((a, b) => a - b); return ds.length ? (ds[0] + (ds[1] ?? ds[0])) / 2 : Infinity; });
+  const score = per.map(near2);
   const order = [0, 1, 2, 3].sort((a, b) => score[a] - score[b]);
-  return { zone: order[0], dist: score[order[0]], margin: 1 - score[order[0]] / score[order[1]] };
+  return { zone: order[0], dist: score[order[0]] };
+}
+function decide(p, x, W = p.W, skip = -1) {
+  const k = knn(p, x, skip);
+  const s = linScores(W, x);
+  const order = [0, 1, 2, 3].sort((a, b) => s[b] - s[a]);
+  return { zone: order[0], margin: s[order[0]] - s[order[1]], agree: order[0] === k.zone, dist: k.dist };
+}
+function train(samples, negatives = []) {
+  const all = samples.concat(negatives), d = samples[0].f.length, n = all.length;
+  const mean = new Array(d).fill(0), sd = new Array(d).fill(0);
+  for (const s of all) s.f.forEach((v, i) => mean[i] += v / n);
+  for (const s of all) s.f.forEach((v, i) => sd[i] += (v - mean[i]) ** 2 / n);
+  for (let i = 0; i < d; i++) sd[i] = Math.sqrt(sd[i]) + 0.02;
+  const norm = (f) => f.map((v, i) => (v - mean[i]) / sd[i]);
+  const p = { mean, sd, ch: audio.ch, raw: samples, rawNeg: negatives,
+    samples: samples.map((s) => ({ z: s.zone, x: norm(s.f) })), neg: negatives.map((s) => norm(s.f)) };
+  const xs = p.samples.map((s) => s.x), zs = p.samples.map((s) => s.z);
+  p.lambda = Math.max(4, samples.length * 0.5);
+  p.W = ridge(xs, zs, p.lambda);
+  // leave-one-out per zone (each example judged by a model trained without it)
+  const ok = [0, 0, 0, 0], cnt = [0, 0, 0, 0], nn = [];
+  p.samples.forEach((s, idx) => {
+    const W = ridge(xs.filter((_, i) => i !== idx), zs.filter((_, i) => i !== idx), p.lambda);
+    const r = decide(p, s.x, W, idx);
+    cnt[s.z]++; if (r.zone === s.z) ok[s.z]++; nn.push(r.dist);
+  });
+  nn.sort((a, b) => a - b);
+  p.zoneAcc = ok.map((o, z) => (cnt[z] ? o / cnt[z] : 0));
+  p.loo = ok.reduce((a, b) => a + b, 0) / samples.length;
+  p.ood = nn[Math.floor(nn.length * 0.9)] * 1.8;
+  return p;
 }
 function classify(f) {
-  if (!profile || profile.mean.length !== f.length) return { zone: null, why: "Profil passt nicht, bitte neu kalibrieren" };
+  if (!profile || !profile.W || profile.mean.length !== f.length) return { zone: null, why: "Profil passt nicht, bitte neu kalibrieren" };
   const x = f.map((v, i) => (v - profile.mean[i]) / profile.sd[i]);
-  const r = classifyZ(profile, x);
-  if (r.dist > profile.ood) return { zone: null, why: "unbekanntes Geräusch", ...r };
-  if (r.margin < 0.06) return { zone: null, why: "nicht eindeutig", ...r };
+  const r = decide(profile, x);
+  if (r.dist > profile.ood) return { ...r, zone: null, why: "unbekanntes Geräusch" };
+  if (profile.neg.length && near2(profile.neg.map((n) => dist(x, n))) < r.dist * 0.9) return { ...r, zone: null, why: "Hintergrundgeräusch" };
+  if (r.margin < 0.08 || (!r.agree && r.margin < 0.35)) return { ...r, zone: null, why: "nicht eindeutig" };
   return r;
 }
 
@@ -309,23 +373,25 @@ async function keepAwake() { try { wakeLock = await navigator.wakeLock?.request(
 /* ---------- Screens ---------- */
 let micError = "";
 function home() {
-  audio.onTap = null; onHole = null;
+  audio.onTap = null; audio.loose = false; onHole = null;
   setHoles((h) => h.classList.remove("target", "up"));
   const best = store("holo-maulwurf-best") || 0;
-  const cal = profile ? `Kalibriert · Übereinstimmung ${Math.round(profile.loo * 100)} %` : "Noch nicht kalibriert";
+  const cal = profile ? `Kalibriert · Übereinstimmung ${Math.round(profile.loo * 100)} %${profile.neg.length ? " · Geräuschfilter an" : ""}` : "Noch nicht kalibriert";
   center.innerHTML = `
     <h1>Tisch-Maulwurf</h1>
     <p>Leg das iPhone flach auf den Tisch und klopf <b>neben</b> das Handy, dort wo der Maulwurf auftaucht.</p>
     <p class="small">${cal}${best ? " · Rekord " + best : ""}</p>
     <div class="btns">
       <button class="b" id="bPlay">${profile ? "Spielen" : "Kalibrieren"}</button>
-      ${profile ? '<button class="b alt" id="bCal">Neu kalibrieren</button><button class="b alt" id="bTest">Testen</button>' : ""}
+      ${profile ? '<button class="b alt" id="bCal">Kalibrierung</button><button class="b alt" id="bTest">Testen</button>' : ""}
+      <button class="b alt" id="bSens">Empfindlichkeit: ${sens}</button>
       <button class="b alt" id="bTouch">Ohne Mikro spielen</button>
     </div>
     <p class="status err">${micError}</p>`;
-  $("#bPlay").onclick = () => profile ? withMic(game) : withMic(calibrate);
-  $("#bCal") && ($("#bCal").onclick = () => withMic(calibrate));
+  $("#bPlay").onclick = () => profile ? withMic(game) : withMic(() => calibrate());
+  $("#bCal") && ($("#bCal").onclick = () => withMic(summary));
   $("#bTest") && ($("#bTest").onclick = () => withMic(test));
+  $("#bSens").onclick = () => { const ks = Object.keys(SENS); sens = ks[(ks.indexOf(sens) + 1) % ks.length]; store("holo-maulwurf-sens", sens); home(); };
   $("#bTouch").onclick = () => game(true);
 }
 async function withMic(next) {
@@ -333,49 +399,92 @@ async function withMic(next) {
   catch (e) { micError = (e && e.name === "NotAllowedError") ? "Mikrofon nicht erlaubt. Ohne Mikro geht nur der Touch-Modus." : (e.message || "Mikrofon nicht verfügbar."); home(); }
 }
 
-function calibrate() {
-  const samples = []; let zone = 0, paused = false;
+// Record taps for the given zones. Keeps the other zones' taps and recorded noise.
+function calibrate(todo = [0, 1, 2, 3]) {
+  const samples = profile && todo.length < 4 ? profile.raw.filter((s) => !todo.includes(s.zone)) : [];
+  const negatives = profile && todo.length < 4 ? profile.rawNeg : [];
+  let step = 0, paused = false; onHole = null;
+  const zone = () => todo[step];
   const draw = (msg = "", err = false) => {
-    setHoles((h, i) => h.classList.toggle("target", i === zone));
-    const got = samples.filter((s) => s.zone === zone).length;
+    setHoles((h, i) => h.classList.toggle("target", i === zone()));
+    const got = samples.filter((s) => s.zone === zone()).length;
     center.innerHTML = `
-      <h1>Klopf: ${ZONES[zone]}</h1>
-      <p>Klopf ${PER_ZONE}× mit dem Fingerknöchel auf den Tisch, <b>${ZONES[zone]}</b> neben dem Handy. Verteil die Klopfer ein bisschen.</p>
+      <h1>Klopf: ${ZONES[zone()]}</h1>
+      <p>Klopf ${PER_ZONE}× mit dem Fingerknöchel auf den Tisch, <b>${ZONES[zone()]}</b> neben dem Handy. Verteil die Klopfer ein bisschen.</p>
       <div class="dots">${Array.from({ length: PER_ZONE }, (_, i) => `<b class="${i < got ? "on" : ""}"></b>`).join("")}</div>
       <div class="meter"><div id="lvl"></div></div>
       <p class="status ${err ? "err" : ""}">${msg}</p>
       <div class="btns"><button class="b alt" id="bUndo">Rückgängig</button><button class="b alt" id="bBack">Abbrechen</button></div>`;
     $("#bBack").onclick = home;
-    $("#bUndo").onclick = () => { const k = samples.findLastIndex((s) => s.zone === zone); if (k >= 0) samples.splice(k, 1); draw("Letzter Klopfer entfernt"); };
+    $("#bUndo").onclick = () => { const k = samples.findLastIndex((s) => s.zone === zone()); if (k >= 0) samples.splice(k, 1); draw("Letzter Klopfer entfernt"); };
+    meterLoop();
   };
-  meterLoop();
   audio.onTap = (data) => {
     if (paused) return;
     const a = analyse(data);
     if (a.quality === "clipped") return draw("Zu fest, klopf etwas leichter.", true);
     if (a.quality === "weak") return draw("Zu leise, klopf etwas fester.", true);
     if (a.quality === "sustained") return draw("Das klang nicht wie ein Klopfen. Kurz warten, dann nochmal.", true);
-    samples.push({ zone, f: a.f });
-    flash(zone, "hit");
-    if (samples.filter((s) => s.zone === zone).length >= PER_ZONE) {
-      if (zone === 3) {
-        profile = train(samples); store("holo-maulwurf-profile", profile);
-        audio.onTap = null; setHoles((h) => h.classList.remove("target"));
-        const pct = Math.round(profile.loo * 100);
-        center.innerHTML = `<h1>Fertig!</h1>
-          <p>Übereinstimmung der Kalibrierung: <b>${pct} %</b></p>
-          <p class="small">${pct >= 80 ? "Sieht gut aus." : "Eher wackelig. Tipp: Handy nicht bewegen, fester Tisch, Zonen weiter auseinander klopfen."}</p>
-          <div class="btns"><button class="b" id="bGo">Spielen</button><button class="b alt" id="bT">Erst testen</button><button class="b alt" id="bR">Nochmal</button></div>`;
-        $("#bGo").onclick = () => game(); $("#bT").onclick = test; $("#bR").onclick = calibrate;
-        return;
-      }
-      zone++; paused = true; draw("Weiter zur nächsten Zone…");
-      setTimeout(() => { paused = false; draw("Bereit"); }, 1100);
+    samples.push({ zone: zone(), f: a.f });
+    flash(zone(), "hit");
+    if (samples.filter((s) => s.zone === zone()).length < PER_ZONE) return draw("Gut!");
+    if (step === todo.length - 1) {
+      audio.onTap = null; setHoles((h) => h.classList.remove("target"));
+      center.innerHTML = "<h1>Rechne…</h1>";
+      setTimeout(() => { profile = train(samples, negatives); store(PROFILE_KEY, profile); summary(); }, 30);
       return;
     }
-    draw("Gut!");
+    step++; paused = true; draw("Weiter zur nächsten Zone…");
+    setTimeout(() => { paused = false; draw("Bereit"); }, 1100);
   };
   draw("Bereit");
+}
+
+// Calibration result with per-zone check, like Holo's consistency check.
+function summary() {
+  audio.onTap = null; audio.loose = false; onHole = null;
+  if (!profile) return calibrate();
+  setHoles((h) => h.classList.remove("target", "up"));
+  const acc = profile.zoneAcc;
+  const weakest = [0, 1, 2, 3].sort((a, b) => acc[a] - acc[b])[0];
+  const pct = Math.round(profile.loo * 100);
+  center.innerHTML = `<h1>Kalibrierung ${pct} %</h1>
+    <p class="small">${ZONES.map((z, i) => `${z}: <b>${Math.round(acc[i] * 100)} %</b>`).join(" · ")}</p>
+    <p class="small">${profile.neg.length ? `Geräuschfilter: ${profile.neg.length} Hintergrundgeräusche gelernt.` : "Tipp: Nimm Hintergrundgeräusche auf, damit Reden und Rascheln ignoriert werden."}</p>
+    <div class="btns">
+      <button class="b" id="bGo">Spielen</button>
+      <button class="b alt" id="bNoise">${profile.neg.length ? "Mehr Geräusche aufnehmen" : "Hintergrund aufnehmen"}</button>
+      ${acc[weakest] < 0.9 ? `<button class="b alt" id="bRedo">„${ZONES[weakest]}“ wiederholen</button>` : ""}
+      <button class="b alt" id="bT">Testen</button>
+      <button class="b alt" id="bAll">Alles neu</button>
+    </div>`;
+  $("#bGo").onclick = () => game(); $("#bT").onclick = test; $("#bNoise").onclick = recordNoise;
+  $("#bAll").onclick = () => { profile = null; calibrate(); };
+  $("#bRedo") && ($("#bRedo").onclick = () => calibrate([weakest]));
+}
+
+// Collect "not a knock" sounds as negative examples (Holo: rejection training).
+function recordNoise() {
+  const negs = profile.rawNeg.slice(); const t0 = performance.now(); let heard = 0;
+  audio.loose = true; // catch more events than in play, so borderline noises get learned
+  center.innerHTML = `<h1>Geräusche machen</h1>
+    <p>Rede normal, tipp aufs Handy, raschel, tipp auf der Tastatur. <b>Nicht auf den Tisch klopfen!</b></p>
+    <div class="meter"><div id="lvl"></div></div>
+    <p class="status" id="nstat">Noch 10 s · 0 Geräusche</p>`;
+  meterLoop();
+  audio.onTap = (data) => {
+    const a = analyse(data); heard++;
+    if (a.quality !== "clipped" && a.quality !== "weak") negs.push({ zone: -1, f: a.f });
+  };
+  const iv = setInterval(() => {
+    const left = Math.ceil(10 - (performance.now() - t0) / 1000);
+    const el = $("#nstat"); if (el) el.textContent = `Noch ${Math.max(0, left)} s · ${heard} Geräusche`;
+    if (left <= 0) {
+      clearInterval(iv); audio.onTap = null; audio.loose = false;
+      center.innerHTML = "<h1>Rechne…</h1>";
+      setTimeout(() => { profile = train(profile.raw, negs.slice(-60)); store(PROFILE_KEY, profile); summary(); }, 30);
+    }
+  }, 250);
 }
 
 function meterLoop() {
@@ -386,18 +495,28 @@ function meterLoop() {
 
 function test() {
   setHoles((h) => h.classList.remove("target", "up"));
-  center.innerHTML = `<h1>Testen</h1><p>Klopf irgendwo. Die erkannte Ecke leuchtet grün.</p>
+  let last = null;
+  center.innerHTML = `<h1>Testen</h1><p>Klopf irgendwo. Die erkannte Ecke leuchtet grün. Falsch erkannt? Tipp danach auf das richtige Loch, dann lernt das Spiel dazu.</p>
     <div class="meter"><div id="lvl"></div></div><p class="status" id="res">Warte auf Klopfen…</p>
     <div class="btns"><button class="b" id="bGo">Spielen</button><button class="b alt" id="bBack">Zurück</button></div>`;
-  $("#bGo").onclick = () => game(); $("#bBack").onclick = home;
+  $("#bGo").onclick = () => game(); $("#bBack").onclick = summary;
   meterLoop();
+  const why = { sustained: "klang nicht wie Klopfen", weak: "zu leise", clipped: "zu laut" };
   audio.onTap = (data) => {
     const a = analyse(data);
-    if (a.quality !== "ok") { $("#res").textContent = "Kein sauberes Klopfen (" + a.quality + ")"; return; }
+    if (a.quality !== "ok") { $("#res").textContent = "Ignoriert: " + why[a.quality]; return; }
+    last = a.f;
     const r = classify(a.f);
     if (r.zone === null) { $("#res").textContent = "Abgelehnt: " + r.why; return; }
     flash(r.zone, "hit");
-    $("#res").textContent = `${ZONES[r.zone]} · Sicherheit ${Math.round(r.margin * 100)} %`;
+    $("#res").textContent = `${ZONES[r.zone]} · Sicherheit ${Math.min(100, Math.round(r.margin * 100))} %`;
+  };
+  // correction: tapping a hole adds the last knock as an example for that zone
+  onHole = (z) => {
+    if (!last) return;
+    profile = train(profile.raw.concat([{ zone: z, f: last }]), profile.rawNeg);
+    store(PROFILE_KEY, profile); last = null; flash(z, "hit");
+    $("#res").textContent = `Gelernt: das war ${ZONES[z]}`;
   };
 }
 
