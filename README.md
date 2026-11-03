@@ -10,3 +10,8 @@ Ein Klopf-Spiel fürs iPhone, inspiriert von [Holo](https://github.com/JustinGam
 3. Spielen: 45 Sekunden, so viele Maulwürfe wie möglich treffen.
 
 Die Erkennung ist eine vereinfachte JavaScript-Version der Holo-Pipeline: Klopf-Erkennung mit adaptivem Rauschpegel, Frequenz- und Zeit-Merkmale, k-nächste-Nachbarn mit Ablehnung unklarer Geräusche. Alles läuft lokal im Browser, es wird kein Audio gespeichert oder hochgeladen.
+
+## Tipps
+- Fester Holztisch funktioniert am besten, das Handy während des Spielens nicht verschieben.
+- Mit dem Fingerknöchel klopfen, gleichmäßig fest.
+- Wenn die Erkennung nach dem Verschieben schlechter wird: neu kalibrieren.
