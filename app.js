@@ -6,6 +6,56 @@ const $ = (s) => document.querySelector(s);
 const holes = [...document.querySelectorAll(".hole")];
 const center = $("#center");
 let profile = store(PROFILE_KEY);
+// Pretrained model shipped with the app (trained from exported data); used when there is no own calibration.
+let pretrained = null;
+fetch("model.json", { cache: "no-cache" }).then((r) => (r.ok ? r.json() : null)).then((m) => { if (m && m.W) { pretrained = m; if (!audio.onTap) home(); } }).catch(() => {});
+const model = () => profile || pretrained;
+
+/* ---------- Neuronales Netz (PyTorch → ONNX), läuft per onnxruntime im Browser ---------- */
+const ORT_URL = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/";
+const net = { session: null, meta: null, error: "" };
+let useNet = store("holo-maulwurf-usenet") !== false;
+const netActive = () => !!net.session && (useNet || !model());
+fetch("model-meta.json", { cache: "no-cache" }).then((r) => (r.ok ? r.json() : null)).then((meta) => {
+  if (!meta) return;
+  net.meta = meta;
+  return new Promise((res, rej) => { const s = document.createElement("script"); s.src = ORT_URL + "ort.min.js"; s.onload = res; s.onerror = rej; document.head.appendChild(s); })
+    .then(() => { window.ort.env.wasm.wasmPaths = ORT_URL; window.ort.env.wasm.numThreads = 1; return window.ort.InferenceSession.create("model.onnx?v=" + encodeURIComponent(meta.name || "")); })
+    .then((s) => { net.session = s; if (!audio.onTap) home(); });
+}).catch((e) => { net.error = "Netz konnte nicht geladen werden"; });
+// Same preprocessing as training/tapdata.py
+function netInput(data, m) {
+  const { start, length } = net.meta, x = data[0];
+  let mx = 1e-6, peak = 0;
+  for (let i = 0; i < x.length; i++) peak = Math.max(peak, Math.abs(x[i]));
+  for (let i = start; i < start + length; i++) mx = Math.max(mx, Math.abs(x[i]));
+  const wave = new Float32Array(length);
+  for (let i = 0; i < length; i++) wave[i] = x[start + i] / mx;
+  const has = m && m.peak > 0 ? 1 : 0, d = has ? m.dir : [0, 0, 0];
+  const extra = Float32Array.from([Math.log10(peak + 1e-4), has * Math.log10((has ? m.peak : 0) + 1e-3), d[0], d[1], d[2], has]);
+  return { wave, extra };
+}
+audio.pre = async (data, meta) => {
+  if (!net.session) return;
+  const { wave, extra } = netInput(data, meta.time != null ? motionAround(meta.time) : null);
+  const out = await net.session.run({ wave: new ort.Tensor("float32", wave, [1, 1, wave.length]), extra: new ort.Tensor("float32", extra, [1, extra.length]) });
+  const l = Array.from(out.logits.data), mx = Math.max(...l), ex = l.map((v) => Math.exp(v - mx)), s = ex.reduce((p, q) => p + q, 0);
+  meta.net = ex.map((v) => v / s);
+};
+// Decision for one detected sound: neural net if active, otherwise calibration model.
+function judge(a, meta) {
+  if (netActive() && meta && meta.net) {
+    const p = meta.net, k = p.indexOf(Math.max(...p));
+    if (k === 4) return { zone: null, why: "Netz: kein Klopfen", margin: p[4] };
+    if (p[k] < (net.meta.threshold || 0.6)) return { zone: null, why: "Netz unsicher", margin: p[k] };
+    return { zone: k, margin: p[k] };
+  }
+  if (!model()) return null;
+  if (a.quality !== "ok") return { zone: null, why: QUALITY[a.quality] };
+  return classify(model(), a);
+}
+const usable = (a) => a.quality !== "weak";
+const feats = (data, meta) => { const m = model(); return analyse(data, meta, m ? m.motion : motion.ok, m ? !!m.mono : false); };
 // Raw audio of this session (memory only): calibration knocks for augmentation, plus everything for export.
 const session = { calAudio: [], blocks: [], log: [] };
 let nextId = Date.now();
@@ -41,6 +91,7 @@ let tableName = store("holo-maulwurf-table") || "";
 function logAudio(kind, label, data, a, extra = {}) {
   const rec = { id: nextId++, t: new Date().toISOString(), kind, label, table: tableName, sr: audio.sr, mics: audio.ch,
     quality: a.quality, snr: a.snr, motion: a.m && { peak: a.m.peak, noise: a.m.noise, dir: a.m.dir },
+    bg: a.bg ? a.bg.map((c) => ({ be: c.be.map((v) => +v.toPrecision(4)), env: c.env.map((v) => +v.toPrecision(4)) })) : null,
     ch0: toB64(data[0]), ch1: audio.ch > 1 ? toB64(data[1]) : null, ...extra };
   idbPut(rec);
   return rec;
@@ -70,20 +121,23 @@ function home() {
   stopAll();
   const evals = store(EVALS_KEY) || [];
   const status = profile
-    ? `Kalibriert: ${pct(profile.loo)} · ${profile.neg.length} Störgeräusche gelernt · Vibration ${profile.gate ? "aktiv" : profile.motion ? "hilft hier nicht" : "aus"}`
-    : "Noch nicht kalibriert";
+    ? `Eigene Kalibrierung: ${pct(profile.loo)} · ${profile.neg.length} Störgeräusche gelernt · Vibration ${profile.gate ? "aktiv" : profile.motion ? "hilft hier nicht" : "aus"}`
+    : net.session ? "" : pretrained ? `Vortrainiertes Modell ${pretrained.name || ""} aktiv (${pretrained.trainedOn || "?"} Aufnahmen). Eigene Kalibrierung optional.` : "Noch nicht kalibriert";
   center.innerHTML = `
     <h1>Kalibrier-Labor</h1>
     <p>iPhone flach auf den Tisch legen und nicht mehr bewegen. Geklopft wird <b>neben</b> das Handy in die vier Ecken.</p>
+    ${net.session ? `<p class="small">Neuronales Netz vom ${net.meta.name} geladen (${net.meta.trainedOn} Aufnahmen) · ${netActive() ? "<b>aktiv</b>" : "aus"}</p>` : net.error ? `<p class="small">${net.error}</p>` : ""}
     <p class="small">${status}</p>
     ${evals.length ? `<p class="small">Letzte Tests: ${evals.slice(-4).map((e) => `${e.condition} <b>${pct(e.overall)}</b>`).join(" · ")}</p>` : ""}
     <div class="btns">
-      ${profile ? '<button class="b" id="bEval">Genauigkeitstest</button><button class="b alt" id="bCal">Kalibrierung</button><button class="b alt" id="bLive">Live-Test</button>'
-                : '<button class="b" id="bCal">Kalibrieren</button>'}
+      <button class="b" id="bCollect">Daten sammeln</button>
+      ${model() || net.session ? '<button class="b alt" id="bEval">Genauigkeitstest</button><button class="b alt" id="bLive">Live-Test</button>' : ""}
+      ${net.session && model() ? `<button class="b alt" id="bNet">Erkennung: ${netActive() ? "Netz" : "Kalibrierung"}</button>` : ""}
+      <button class="b alt" id="bCal">${profile ? "Kalibrierung" : "Kalibrieren"}</button>
       <button class="b alt" id="bSens">Empfindlichkeit: ${audio.sens}</button>
-      <button class="b alt" id="bCollect">Daten sammeln</button>
       <button class="b alt" id="bExp">Exportieren</button>
-      ${profile ? '<button class="b alt" id="bGame">Spiel</button>' : ""}
+      ${model() || net.session ? '<button class="b alt" id="bGame">Spiel</button>' : ""}
+      ${profile && pretrained ? '<button class="b alt" id="bUsePre">Vortrainiertes Modell nutzen</button>' : ""}
     </div>
     <p class="small" id="dcount"></p>
     <p class="status err">${micError}</p>`;
@@ -92,6 +146,8 @@ function home() {
   $("#bLive") && ($("#bLive").onclick = () => withMic(live));
   $("#bExp").onclick = () => exportData($("#bExp"));
   $("#bCollect").onclick = collectSetup;
+  $("#bNet") && ($("#bNet").onclick = () => { useNet = !netActive(); store("holo-maulwurf-usenet", useNet); home(); });
+  $("#bUsePre") && ($("#bUsePre").onclick = () => { profile = null; store(PROFILE_KEY, null); home(); });
   idbCount().then((n) => { const el = $("#dcount"); if (el && n) el.innerHTML = `${n} Aufnahmen gesammelt · <button class="lnk" id="bClr">löschen</button>`;
     const c = $("#bClr"); if (c) c.onclick = () => { c.outerHTML = '<button class="lnk" id="bClr2">Wirklich alle löschen?</button>'; $("#bClr2").onclick = () => idbClear().then(home); }; });
   $("#bGame") && ($("#bGame").onclick = () => withMic(game));
@@ -196,7 +252,7 @@ function recordNoise() {
     <div class="btns"><button class="b alt" id="bStop">Fertig</button></div>`;
   meterLoop();
   audio.onTap = (data, meta) => {
-    const a = analyse(data, meta, profile.motion); heard++;
+    const a = feats(data, meta); heard++;
     if (a.quality !== "clipped" && a.quality !== "weak") negs.push({ zone: -1, f: a.f, mpeak: a.mpeak, mnoise: a.mnoise });
     logAudio("noise", -1, data, a, { background: "Störgeräusche" });
   };
@@ -238,9 +294,9 @@ function runEval(condition) {
   const arm = () => { armed = false; draw("Gleich geht's los…"); setTimeout(() => { armed = true; draw("Bereit, klopfen!"); }, 900); };
   audio.onTap = (data, meta) => {
     if (!armed) return;
-    const a = analyse(data, meta, profile.motion);
+    const a = feats(data, meta);
     if (a.quality === "weak") return;
-    const r = a.quality === "ok" ? classify(profile, a) : { zone: null, why: QUALITY[a.quality] };
+    const r = judge(a, meta) || { zone: null, why: "kein Modell" };
     conf[zone][r.zone ?? 4]++; n++; logAudio("test", zone, data, a, { background: condition, predicted: r.zone });
     events.push({ target: zone, got: r.zone, why: r.why || null, quality: a.quality, f: a.f, mpeak: a.mpeak, snr: a.snr });
     if (r.zone === zone) flash(zone, "hit"); else if (r.zone !== null) flash(r.zone, "wrong");
@@ -257,8 +313,8 @@ function runEval(condition) {
       <div class="meter"><div id="lvl"></div></div><p class="status" id="qs">Noch ${SECS} s</p>`;
     meterLoop();
     audio.onTap = (data, meta) => {
-      const a = analyse(data, meta, profile.motion); heard++;
-      const r = a.quality === "ok" ? classify(profile, a) : { zone: null };
+      const a = feats(data, meta); heard++;
+      const r = judge(a, meta) || { zone: null };
       if (r.zone !== null) { falseHits++; flash(r.zone, "wrong"); }
       logAudio("test-pause", -1, data, a, { background: condition, predicted: r.zone });
       events.push({ target: -1, got: r.zone, why: r.why || null, quality: a.quality, f: a.f, mpeak: a.mpeak, snr: a.snr });
@@ -272,10 +328,10 @@ function runEval(condition) {
   function finishEval(falseHits, heard) {
     const correct = conf.reduce((s, row, z) => s + row[z], 0), total = conf.flat().reduce((a, b) => a + b, 0);
     const res = {
-      date: new Date().toISOString(), condition, sens: audio.sens, mics: audio.ch, motionGate: !!profile.gate,
+      date: new Date().toISOString(), condition, sens: audio.sens, mics: audio.ch, motionGate: !!(model() && model().gate), recognizer: netActive() ? "Netz " + net.meta.name : profile ? "eigene Kalibrierung" : "vortrainiert",
       overall: correct / Math.max(1, total), perZone: conf.map((row, z) => row[z] / Math.max(1, row.reduce((a, b) => a + b, 0))),
       rejected: conf.reduce((s, row) => s + row[4], 0), confusion: conf, falseHits, quietEvents: heard,
-      calibration: { loo: profile.loo, zoneAcc: profile.zoneAcc, negatives: profile.neg.length },
+      calibration: model() ? { loo: model().loo, zoneAcc: model().zoneAcc || [0, 0, 0, 0], negatives: model().neg.length } : null,
     };
     const evals = (store(EVALS_KEY) || []).concat([{ ...res }]).slice(-10); store(EVALS_KEY, evals);
     lastEvalEvents = events;
@@ -293,7 +349,7 @@ function showEval(res) {
     <div class="btns"><button class="b" id="bCopy">Bericht kopieren</button><button class="b alt" id="bAgain">Nochmal testen</button><button class="b alt" id="bHome">Menü</button></div>
     <p class="status" id="cst"></p>`;
   $("#bAgain").onclick = evaluation; $("#bHome").onclick = home;
-  $("#bCopy").onclick = () => copyText(JSON.stringify({ ...res, calibration: { ...res.calibration, zoneAcc: res.calibration.zoneAcc.map((v) => +v.toFixed(2)) } }));
+  $("#bCopy").onclick = () => copyText(JSON.stringify(res));
 }
 function copyText(t) {
   const done = (ok) => { const el = $("#cst"); if (el) el.textContent = ok ? "Kopiert. Füg es einfach im Chat ein." : "Kopieren ging nicht."; };
@@ -309,16 +365,16 @@ function live() {
     <div class="btns"><button class="b alt" id="bBack">Zurück</button></div>`;
   $("#bBack").onclick = home; meterLoop();
   audio.onTap = (data, meta) => {
-    const a = analyse(data, meta, profile.motion);
-    if (a.quality !== "ok") { $("#res").textContent = "Ignoriert: " + QUALITY[a.quality]; return; }
+    const a = feats(data, meta);
+    if (a.quality === "weak" || (!netActive() && a.quality !== "ok")) { $("#res").textContent = "Ignoriert: " + QUALITY[a.quality]; return; }
     last = a;
-    const r = classify(profile, a);
+    const r = judge(a, meta);
     if (r.zone === null) { $("#res").textContent = "Abgelehnt: " + r.why; return; }
     flash(r.zone, "hit");
     $("#res").textContent = `${ZONES[r.zone]} · Sicherheit ${Math.min(100, Math.round(r.margin * 100))} %`;
   };
   onHole = (z) => {
-    if (!last) return;
+    if (!last || !profile) return;
     save(train(profile.raw.concat([{ zone: z, f: last.f, mpeak: last.mpeak, mnoise: last.mnoise, id: nextId++ }]), profile.rawNeg, profile.motion));
     last = null; flash(z, "hit"); $("#res").textContent = `Gelernt: das war ${ZONES[z]}`;
   };
@@ -378,19 +434,21 @@ function collect(mode, bg) {
       <div class="meter"><div id="lvl"></div></div>
       <p class="status" id="res">${msg}</p>
       <p class="small">${tableName} · ${bg} · gespeichert: ${saved} (${ZONES.map((z, i) => counts[i]).join("/")} Ecken, ${counts[4]} Geräusche)</p>
-      <div class="btns">${pending || (mode !== "frei" && lastRec) ? '<button class="b alt" id="bNo">Kein Klopfen</button>' : ""}
+      <div class="btns">${pending && pending.r ? `<button class="b" id="bOk">Stimmt: ${pending.r.zone === null ? "kein Klopfen" : ZONES[pending.r.zone]}</button>` : ""}
+        ${pending || (mode !== "frei" && lastRec) ? '<button class="b alt" id="bNo">Kein Klopfen</button>' : ""}
         ${pending ? '<button class="b alt" id="bSkip">Verwerfen</button>' : ""}
         <button class="b alt" id="bEnd">Fertig</button></div>`;
     $("#bEnd").onclick = () => { stopAll(); collectSetup(); };
     $("#bNo") && ($("#bNo").onclick = () => label(-1));
+    $("#bOk") && ($("#bOk").onclick = () => label(pending.r.zone === null ? -1 : pending.r.zone));
     $("#bSkip") && ($("#bSkip").onclick = () => { pending = null; draw("Verworfen"); });
     meterLoop();
   };
-  const predict = (a) => (profile && a.quality === "ok" ? classify(profile, a) : null);
+  const predict = (a, meta) => judge(a, meta);
   const label = (z) => {
     if (pending) { // free mode: save with the chosen label
-      const { data, a, r } = pending; pending = null;
-      lastRec = logAudio("collect", z, data, a, { background: bg, mode, predicted: r ? r.zone : null }); saved++; counts[z < 0 ? 4 : z]++;
+      const { data, a, r, meta } = pending; pending = null;
+      lastRec = logAudio("collect", z, data, a, { background: bg, mode, predicted: r ? r.zone : null, net: meta.net || null }); saved++; counts[z < 0 ? 4 : z]++;
       if (z >= 0) flash(z, "hit");
       return draw(`Gespeichert: ${z < 0 ? "kein Klopfen" : ZONES[z]}`);
     }
@@ -402,13 +460,13 @@ function collect(mode, bg) {
   };
   onHole = (z) => label(z);
   audio.onTap = (data, meta) => {
-    const a = analyse(data, meta, profile ? profile.motion : motion.ok);
+    const a = feats(data, meta);
     if (a.quality === "weak" && mode !== "geräusche") return;
-    const r = predict(a);
+    const r = predict(a, meta);
     const guess = r ? (r.zone === null ? "abgelehnt: " + r.why : "erkannt: " + ZONES[r.zone]) : "";
-    if (mode === "frei") { if (pending) return; pending = { data, a, r }; return draw(guess ? `Modell sagt: ${guess}` : "Erkannt. Welche Ecke?"); }
+    if (mode === "frei") { if (pending) return; pending = { data, a, r, meta }; if (r && r.zone !== null) flash(r.zone, "hit"); return draw(guess ? `Modell sagt: ${guess}. Stimmt das? Sonst aufs richtige Loch tippen.` : "Erkannt. Welche Ecke? Aufs Loch tippen."); }
     const z = mode === "geführt" ? target : -1;
-    lastRec = logAudio("collect", z, data, a, { background: bg, mode, predicted: r ? r.zone : null }); saved++; counts[z < 0 ? 4 : z]++;
+    lastRec = logAudio("collect", z, data, a, { background: bg, mode, predicted: r ? r.zone : null, net: meta.net || null }); saved++; counts[z < 0 ? 4 : z]++;
     if (mode === "geführt") { flash(z, r && r.zone !== null && r.zone !== z ? "wrong" : "hit"); pick(); }
     draw(`Gespeichert${guess ? " · Modell: " + guess : ""}`);
   };
@@ -443,8 +501,8 @@ function game() {
     } else { misses++; $("#ms").textContent = misses; flash(z, "wrong"); }
   };
   audio.onTap = (data, meta) => {
-    const a = analyse(data, meta, profile.motion); if (a.quality !== "ok") return;
-    const r = classify(profile, a); if (r.zone !== null) hitZone(r.zone);
+    const a = feats(data, meta); if (!usable(a)) return;
+    const r = judge(a, meta); if (r && r.zone !== null) hitZone(r.zone);
   };
   const tick = setInterval(() => {
     const left = Math.max(0, Math.ceil((LEN - (performance.now() - t0)) / 1000));

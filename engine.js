@@ -110,7 +110,10 @@ function process(buf) {
       if (c.pos >= WIN) {
         audio.capture = null;
         // wait a little so the motion sensor samples around the knock have arrived
-        setTimeout(() => audio.onTap?.(c.data, c.meta), 110);
+        setTimeout(() => {
+          const go = () => audio.onTap?.(c.data, c.meta);
+          audio.pre ? audio.pre(c.data, c.meta).then(go, go) : go(); // e.g. neural net inference
+        }, 110);
       }
     } else {
       // A knock is a sudden jump: loud vs. the noise floor AND vs. the hops 3–6 back.
@@ -191,8 +194,9 @@ function motionAround(t) {
 
 /* ---------- Impact gate + features ---------- */
 // withMotion: whether the profile uses motion features (fixes the feature length)
-function analyse(data, meta = {}, withMotion = false) {
-  const sr = audio.sr, two = audio.ch > 1, bg = meta.bg;
+// mono: ignore the second mic (used by the pretrained model so it fits every iPhone/browser)
+function analyse(data, meta = {}, withMotion = false, mono = false) {
+  const sr = audio.sr, two = audio.ch > 1 && !mono, bg = meta.bg;
   let peak = 0; for (const c of data) for (const v of c) peak = Math.max(peak, Math.abs(v));
   const raw = [0, 1].map((c) => ({ be: spectrum(data[c], sr), env: envelope(data[c]) }));
   // background subtraction: remove what music/speech contributed before the knock
@@ -223,7 +227,7 @@ function analyse(data, meta = {}, withMotion = false) {
   }
   const m = meta.m || (meta.time != null ? motionAround(meta.time) : { peak: 0, noise: 0, dir: [0, 0, 0] });
   if (withMotion) f.push(Math.log10(m.peak + 1e-3), ...m.dir);
-  return { f, quality, peak, snr, mpeak: m.peak, mnoise: m.noise, m };
+  return { f, quality, peak, snr, mpeak: m.peak, mnoise: m.noise, m, bg };
 }
 
 /* Multi-condition training: mix each calibration knock with recorded background
@@ -345,3 +349,13 @@ function classify(p, a) {
   if (r.margin < 0.08 || (!r.agree && r.margin < 0.35)) return { ...r, zone: null, why: "nicht eindeutig" };
   return r;
 }
+
+/* Strip a trained profile down to what classify() needs (for model.json). */
+function compactModel(p, info = {}) {
+  const r4 = (v) => Math.round(v * 1e4) / 1e4;
+  return { v: p.v, kind: "pretrained", mono: !!p.mono, motion: p.motion, gate: p.gate, ood: p.ood, loo: p.loo, zoneAcc: p.zoneAcc,
+    mean: p.mean.map(r4), sd: p.sd.map(r4), W: p.W.map((row) => row.map(r4)),
+    samples: p.samples.map((s) => ({ z: s.z, x: s.x.map((v) => Math.round(v * 100) / 100) })),
+    neg: p.neg.map((x) => x.map((v) => Math.round(v * 100) / 100)), ...info };
+}
+if (typeof module !== "undefined") module.exports = { audio, analyse, train, classify, compactModel, ZONES, WIN };
